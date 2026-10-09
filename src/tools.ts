@@ -24,6 +24,10 @@ export interface RoomApi {
   reminderGet(id: number): { id: number; time: string; message: string } | null;
   itineraryDay(date: string): { title: string; detail: string; status: string } | null;
   expenseGet(id: number): ExpenseBrief | null;
+  /** 已確認的記帳卡片寫進帳本的是哪一筆 */
+  confirmedExpense(draftId: number): number | null;
+  /** 同一天、同金額、同幣別的帳 */
+  expenseSame(date: string, amount: number, currency: string): ExpenseBrief[];
   /** 品項關鍵字找帳（空字串＝最近的幾筆） */
   expenseFind(keyword: string): ExpenseBrief[];
   documentSave(title: string, note: string, photoId: string, author: string, folder?: number | null): unknown;
@@ -50,6 +54,8 @@ export interface ExpenseBrief {
   amount: number;
   currency: string;
   payer: string;
+  category?: string;
+  split_among?: string[];
 }
 
 export interface ExpenseInput {
@@ -106,6 +112,7 @@ export interface DraftInput {
 }
 
 const REPLACES_PARAM = { type: "integer", description: "修正還沒確認的卡片時，填那張卡片的編號（見系統提示「等待成員確認的卡片」）" };
+const EDIT_PARAM = { type: "integer", description: "要修改帳本裡已經記好的某一筆（金額、日期、付款人、分攤打錯）時，填那筆的帳目 id（用 find_expenses 查，不是卡片編號）；只填要改的欄位（沒提到的不要填，會沿用原本的），確認後直接改那一筆，不會多一筆。新增的帳不要填" };
 
 /** 住宿的專有寫法（房源名稱、地址、大樓名，見 trip-data 的 aliases）做成比對用的 regex（空白可有可無）；沒設定就永遠比不到 */
 export const HOME_NAMES = TRIP.accommodation.aliases.length
@@ -757,6 +764,36 @@ const NEARBY: Record<string, string> = {
   park: `nw(around:{r},{lat},{lon})["leisure"~"^(park|playground)$"];`,
 };
 
+/** Tavily 這個月的額度用完（432 免費額度、433 隨用隨付上限）：工具結果帶這個標記，回答會註明「沒有上網查證」 */
+export const SEARCH_OUT = "search_quota_exhausted";
+const quotaOut = (status: number) => status === 432 || status === 433;
+const searchOut = () => ({
+  error: "這個月的網路搜尋額度用完了，這次沒辦法上網查。不要說「查不到」「不存在」或「已經沒有」：照你知道的回答，並清楚說這次沒有上網查證、資訊可能過時，請成員出發前自己再確認。",
+  [SEARCH_OUT]: true,
+});
+
+/** 記帳卡片要改帳本裡的某一筆（edit_id）：沒填的欄位沿用原本的（模型常只填改了的金額，日期就變成今天） */
+function editBase(args: Record<string, any>, room: RoomApi): { old: ExpenseBrief | null; args: Record<string, any>; error?: string } {
+  // 模型常拿「已經確認的卡片編號」填 replaces：換成那張卡片寫進帳本的那一筆，不然會多記一筆
+  const fromCard = !args.edit_id && args.replaces ? room.confirmedExpense(Number(args.replaces)) : null;
+  const editId = Number(args.edit_id) || fromCard || 0;
+  if (!editId) return { old: null, args };
+  const old = room.expenseGet(editId);
+  if (!old) return { old, args, error: `帳本裡沒有 #${editId} 這筆帳（還沒確認的卡片要用 replaces），請先用 find_expenses 查到正確的帳目 id` };
+  const given = Object.fromEntries(Object.entries(args).filter(([k, v]) => v != null && v !== "" && !(Array.isArray(v) && !v.length) && !(fromCard && k === "replaces")));
+  return { old, args: { description: old.description, amount: old.amount, date: old.date, payer: old.payer, currency: old.currency, category: old.category, split_among: old.split_among, ...given } };
+}
+
+/** 同一天已經有一樣金額的帳：提醒可能重複記帳（改帳不用） */
+function dupWarning(room: RoomApi, old: ExpenseBrief | null, date: string, amount: number, currency: string): string {
+  if (old) return "";
+  const d = room.expenseSame(date, amount, currency)[0];
+  return d ? `帳本裡 ${date} 已經有一筆一樣金額的「${d.description}」，請確認不是重複記帳` : "";
+}
+
+/** 卡片上「原本：…」：有改才顯示 */
+const was = (before: string | null | undefined, now: string): string | undefined => (before != null && before !== now ? before : undefined);
+
 // ---------------- 工具清單 ----------------
 
 export const TOOLS: Tool[] = [
@@ -781,6 +818,7 @@ export const TOOLS: Tool[] = [
         headers: { "content-type": "application/json", authorization: `Bearer ${env.TAVILY_API_KEY.trim()}` },
         body: JSON.stringify({ query: args.query, max_results: Math.min(Number(args.max_results) || 5, 8), include_answer: "basic", search_depth: "basic" }),
       });
+      if (quotaOut(res.status)) return searchOut();
       if (!res.ok) return { error: `搜尋失敗 ${res.status}` };
       const d: any = await res.json();
       return {
@@ -803,6 +841,7 @@ export const TOOLS: Tool[] = [
         headers: { "content-type": "application/json", authorization: `Bearer ${env.TAVILY_API_KEY.trim()}` },
         body: JSON.stringify({ urls: [args.url] }),
       });
+      if (quotaOut(res.status)) return searchOut();
       if (!res.ok) return { error: `讀取失敗 ${res.status}` };
       const d: any = await res.json();
       const r = d.results?.[0];
@@ -836,6 +875,7 @@ export const TOOLS: Tool[] = [
       // 小店的網路照片常常不能用，每個地方多留一張候選
       const perQuery = Math.max(1, Math.ceil(total / list.length));
 
+      let out = false;
       // 每個關鍵字各自搜尋、各自檢查圖片能不能顯示（約三成會擋外連、不是圖片或太大）
       const groups = await Promise.all(
         list.map(async (query) => {
@@ -846,7 +886,10 @@ export const TOOLS: Tool[] = [
               body: JSON.stringify({ query, max_results: 5, include_images: true, include_image_descriptions: true, search_depth: "basic" }),
               signal: AbortSignal.timeout(20_000),
             });
-            if (!res.ok) return { query, picked: [] as { url: string; description: string; page?: string }[] };
+            if (!res.ok) {
+              if (quotaOut(res.status)) out = true;
+              return { query, picked: [] as { url: string; description: string; page?: string }[] };
+            }
             const d: any = await res.json();
             const seen = new Set<string>();
             const candidates: { url: string; description: string; page?: string }[] = [];
@@ -880,6 +923,7 @@ export const TOOLS: Tool[] = [
         results.push({ query: g.query, found: g.picked.length, descriptions: g.picked.map((p) => p.description.slice(0, 100)) });
       }
       const found = results.reduce((s, r) => s + r.found, 0);
+      if (!found && out) return searchOut();
       if (!found) return { found: 0, note: "找不到可以顯示的圖片，可以換個關鍵字（日文或英文）再試" };
       return {
         found,
@@ -1187,11 +1231,16 @@ export const TOOLS: Tool[] = [
           category: { type: "string", enum: ["餐飲", "交通", "門票", "購物", "住宿", "其他"] },
           date: { type: "string", description: "日期 YYYY-MM-DD，預設今天（東京時間）。收據上的民國年要加 1911（民國 113 年＝2024 年）；令和 N 年＝2018+N 年（令和 7 年＝2025 年）" },
           replaces: REPLACES_PARAM,
+          edit_id: EDIT_PARAM,
         },
         required: ["description", "amount"],
       },
     },
     async run(args, ctx) {
+      const base = editBase(args, ctx.room);
+      if (base.error) return { error: base.error };
+      args = base.args;
+      const old = base.old;
       const currency = String(args.currency || "JPY").toUpperCase();
       const amount = Number(args.amount);
       if (!Number.isFinite(amount) || amount <= 0) return { error: "金額不正確" };
@@ -1218,21 +1267,21 @@ export const TOOLS: Tool[] = [
         // 日期離旅程太遠（例如兩年前在台灣的收據）特別標出來，幣別也最容易在這種時候看錯；出發前幾個月先買票是正常的
         const shift = (d: string, days: number) => new Date(Date.parse(d + "T00:00:00Z") + days * 86400_000).toISOString().slice(0, 10);
         const outside = e.date < shift(TRIP.startDate, -90) || e.date > shift(TRIP.endDate, 14);
-        const warn = outside ? `日期離旅遊期間（${TRIP.startDate}～${TRIP.endDate.slice(5)}）很遠，請確認日期與幣別` : "";
+        const warn = [outside ? `日期離旅遊期間（${TRIP.startDate}～${TRIP.endDate.slice(5)}）很遠，請確認日期與幣別` : "", dupWarning(ctx.room, old, e.date, amount, currency)].filter(Boolean).join("；");
         const other = currency === "JPY" ? `≈ NT$${twd.toLocaleString("en-US")}` : currency === "TWD" ? `≈ ¥${jpy.toLocaleString("en-US")}` : `≈ ¥${jpy.toLocaleString("en-US")}｜NT$${twd.toLocaleString("en-US")}`;
         return ctx.propose({
           kind: "add_expense",
-          payload: e,
+          payload: old ? { ...e, editId: old.id } : e,
           replaces: Number(args.replaces) || undefined,
           preview: {
-            title: "記帳確認",
-            confirm: "確認記帳",
-            summary: `${e.date} ${e.description} ${money(amount, currency)}（${e.payer} 付，${split.length} 人分）`,
+            title: old ? "修改帳目確認" : "記帳確認",
+            confirm: old ? "確認修改" : "確認記帳",
+            summary: `${old ? `修改帳目 #${old.id}：` : ""}${e.date} ${e.description} ${money(amount, currency)}（${e.payer} 付，${split.length} 人分）`,
             rows: [
-              ["日期", e.date],
-              ["項目", String(e.description)],
-              ["金額", `${money(amount, currency)}（${other}${rateEstimated ? "，匯率為估計值" : ""}）`],
-              ["付款人", String(e.payer)],
+              ["日期", e.date, was(old?.date, e.date)],
+              ["項目", String(e.description), was(old?.description, String(e.description))],
+              ["金額", `${money(amount, currency)}（${other}${rateEstimated ? "，匯率為估計值" : ""}）`, was(old && money(old.amount, old.currency), money(amount, currency))],
+              ["付款人", String(e.payer), was(old?.payer, String(e.payer))],
               ["分攤", `${split.join("、")}（每人約 NT$${Math.round(twd / split.length).toLocaleString("en-US")}）`],
               ["分類", e.category],
               ...(warn ? [["⚠️ 注意", warn] as [string, string]] : []),
@@ -1821,6 +1870,9 @@ export const TOOLS: Tool[] = [
 const KANTO = ["東京都", "千葉県", "神奈川県", "埼玉県"];
 export const SCALE_TEXT: Record<number, string> = { 10: "1", 20: "2", 30: "3", 40: "4", 45: "5弱", 50: "5強", 55: "6弱", 60: "6強", 70: "7" };
 
+/** P2P地震情報的國內海嘯資訊 */
+const TSUNAMI_TEXT: Record<string, string> = { None: "無海嘯疑慮", Unknown: "海嘯影響不明", Checking: "海嘯影響調查中", NonEffective: "可能有輕微海面變動，不會造成災害", Watch: "發布海嘯注意報", Warning: "發布海嘯警報" };
+
 export async function japanAlerts() {
   const out: Record<string, unknown> = {};
   await Promise.all([
@@ -1836,14 +1888,16 @@ export async function japanAlerts() {
             return {
               id: e.id,
               time: e.earthquake?.time,
-              place: e.earthquake?.hypocenter?.name,
-              magnitude: e.earthquake?.hypocenter?.magnitude,
+              place: e.earthquake?.hypocenter?.name || null,
+              magnitude: e.earthquake?.hypocenter?.magnitude >= 0 ? e.earthquake.hypocenter.magnitude : null,
               max_intensity: SCALE_TEXT[e.earthquake?.maxScale] ?? "不明",
               kanto_max_intensity: tokyoMax ? SCALE_TEXT[tokyoMax] : null,
-              tsunami: e.earthquake?.domesticTsunami,
+              tsunami: TSUNAMI_TEXT[e.earthquake?.domesticTsunami] ?? e.earthquake?.domesticTsunami,
             };
           })
           .filter((e) => Date.parse(String(e.time).replace(/\//g, "-") + "+09:00") > since)
+          // 同一個地震會有震度速報、震源資訊好幾則（新的在前面）：只留最新、最完整的那則
+          .filter((e, i, all) => all.findIndex((x) => x.time === e.time) === i)
           .slice(0, 8);
         out.tsunami = (list as any[]).filter((e) => e.code === 552 && !e.cancelled).slice(0, 3).map((e) => ({ time: e.time, areas: (e.areas ?? []).map((a: any) => `${a.name}（${a.grade}）`) }));
       } catch {
@@ -1853,7 +1907,11 @@ export async function japanAlerts() {
     (async () => {
       try {
         const tcs = await getJSON("https://www.jma.go.jp/bosai/typhoon/data/targetTc.json", undefined, 10_000);
-        out.typhoons = (tcs as any[]).map((t) => ({ number: t.typhoonNumber ? `第 ${Number(String(t.typhoonNumber).slice(2))} 號` : t.tropicalCyclone, category: t.category, issued: t.issue }));
+        out.typhoons = (tcs as any[]).map((t) => {
+          // 還沒編號的熱帶性低氣壓 typhoonNumber 是「年份＋00」
+          const n = Number(String(t.typhoonNumber ?? "").slice(2));
+          return { id: t.tropicalCyclone, number: n > 0 ? `第 ${n} 號` : null, kind: n > 0 ? "颱風" : "熱帶性低氣壓（可能發展成颱風）", category: t.category, issued: t.issue };
+        });
       } catch {
         out.typhoons = "暫時查不到";
       }
