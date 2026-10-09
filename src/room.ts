@@ -176,9 +176,9 @@ function photoMatch(keyword: string, text: string): number {
 
 /** 會直接寫入資料的工具（不經確認卡片）：成員可能只是在問（「護照大家都帶了嗎？」），不能只看關鍵字就硬寫 */
 const WRITE_TOOLS = new Set(["update_checklist_item", "create_reminder", "add_checklist_items", "save_document", "save_note", "health_log", "health_meds"]);
-function writeNudge(need: string): string {
-  return `（系統提醒：成員這句話可能要你用 ${need}。如果成員是要你做這件事，一定要呼叫 ${need} 才算完成，沒有呼叫就不能說已完成；如果成員只是在問問題或聊天（例如「護照大家都帶了嗎？」是在問，不是說帶了），就不要呼叫，直接照原本的意思回答。成員沒看到你剛才那段回答，不用道歉，也不要提到這個提醒。）`;
-}
+/** 關鍵字命中也不一定要用的工具：另外請 AI 判斷，不是就保留原本的回答（寫入類可能只是在問；「附近」可能只是在說自己在哪裡、其實在問路） */
+const JUDGED_TOOLS = new Set([...WRITE_TOOLS, "find_nearby"]);
+const JUDGE_EXAMPLES = "例如「護照大家都帶了嗎？」是在問，不是說帶了；「我們在車站附近，怎麼回飯店？」是在問路，不是要找附近的店";
 
 /** 這個問題一定要用到、但模型還沒呼叫的工具（沒有就回 null） */
 function requiredTool(text: string, used: string[], hasPhoto: boolean): string | null {
@@ -259,6 +259,15 @@ const ROUTE_VERIFY = new RegExp(`幾站|站數|${CHECK_WORD}.{0,20}${ROUTE_WORD}
 const ROUTE_ASK = /(怎麼|如何).{0,8}(去|到|搭|坐|走)|交通(?![卡費])|路線|轉乘|換車|換線|幾站|(搭|坐).{0,6}(線|車)|(地鐵|捷運|電車|JR|新幹線|巴士|公車).{0,6}(怎麼|如何|哪|幾|要搭|要坐|轉)|從.{1,15}(到|去)/;
 /** 回答裡有搭車步驟（搭哪條線、往哪個方向、在哪站下車）：不管問法，都要附 Google 導航連結和查證按鈕 */
 const ROUTE_STEP = /(搭乘?|坐|轉乘|換乘|轉車).{0,15}(線|號|列車|地鐵|電車|捷運|巴士|公車|新幹線|單軌|輕軌|鐵道)|往.{1,12}方向|(在|於|到).{1,15}(下車|轉乘|換車)|下車|(搭乘?|坐|轉乘|換乘).{0,20}(到|至).{1,12}站/g;
+/**
+ * 自動整理記憶時擋掉交通路線、轉乘、站數：多半是 AI 自己回答的，記錯一次就會一直重複講錯
+ * （實測：記憶裡有「大江戶線直達池袋」，AI 上網查了還是照記憶講）。家人要記可以直接說「記住…」
+ */
+const ROUTE_MEMORY = /(搭乘?|坐|轉乘|換乘|轉車|直達).{0,20}(線|地鐵|電車|捷運|新幹線|單軌|列車)|(\d+|[一兩二三四五六七八九十]+)\s*站(?![前內外口名式])/;
+
+/** 家人做的決定、訂的票、待辦照記（例如「最後一天在池袋寄放行李再搭 Skyliner」）；擋的是「怎麼搭」這類路線資訊 */
+const routeMemory = (content: string, category: unknown) => ROUTE_MEMORY.test(content) && !/決定|預訂|待辦/.test(String(category ?? ""));
+
 function routeAnswer(text: string): boolean {
   return (text.match(ROUTE_STEP) ?? []).length >= 2;
 }
@@ -2520,14 +2529,15 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
             if (!need && !trigger.photo_id && needsVerification(res.text, toolsUsed, knownFacts + toolJson)) need = "web_search";
             // 要寫入資料的工具：AI 正在反問成員（日期不在旅遊期間、金額看不清…）就讓它問，不要蓋掉硬寫
             if (need && DRAFT_TOOLS.has(need) && isAskingBack(res.text)) need = null;
-            if (need && !nudged.has(need) && step < MAX_STEPS - 1) {
+            // 要先判斷的工具（可能只是在問、只是說自己在哪）不請它整段重答（重答常只剩一句，原本的回答就不見了），直接到下面另外判斷
+            if (need && !nudged.has(need) && !JUDGED_TOOLS.has(need) && step < MAX_STEPS - 1) {
               nudged.add(need);
               this.broadcast({ type: "ai_reset", id });
               turns = [
                 ...turns,
                 // 要查證時拿掉還沒查證的草稿：留著的話模型常照抄
                 { role: "model", parts: [{ text: (need !== "web_search" && res.text) || "（略）" }] },
-                { role: "user", parts: [{ text: need === "web_search" ? verifyNudge(trigger.author, trigger.text) : WRITE_TOOLS.has(need) ? writeNudge(need) : `（系統提醒：你還沒有呼叫 ${need}，這件事一定要呼叫 ${need} 才算完成，沒有呼叫就不能說已完成。請現在呼叫，再根據結果完整回答。成員沒看到你剛才那段回答，不用道歉，也不要提到這個提醒。）` }] },
+                { role: "user", parts: [{ text: need === "web_search" ? verifyNudge(trigger.author, trigger.text) : `（系統提醒：你還沒有呼叫 ${need}，這件事一定要呼叫 ${need} 才算完成，沒有呼叫就不能說已完成。請現在呼叫，再根據結果完整回答。成員沒看到你剛才那段回答，不用道歉，也不要提到這個提醒。）` }] },
               ];
               continue;
             }
@@ -2700,13 +2710,6 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       } catch {}
       if (!queries.length) queries = [trigger.text.replace(/給我看|提供|請|幫我找|的?(照片|圖片|相片)|你推薦的/g, "").trim() || trigger.text];
       args = { queries, count: Math.min(queries.length * 2, 6) };
-    } else if (need === "find_nearby") {
-      const t = trigger.text;
-      const category =
-        /便利商店|超商|コンビニ/.test(t) ? "convenience" : /藥妝|藥局|藥/.test(t) ? "drugstore" : /廁所|洗手間|トイレ/.test(t) ? "toilet"
-        : /咖啡|cafe/i.test(t) ? "cafe" : /超市/.test(t) ? "supermarket" : /ATM|提款/i.test(t) ? "atm" : /置物櫃|寄物/.test(t) ? "locker"
-        : /車站|捷運|地鐵|電車/.test(t) ? "station" : /公園|遊樂場/.test(t) ? "park" : /購物|百貨|商場|逛街/.test(t) ? "shopping" : "food";
-      args = { category };
     } else {
       // 其他工具：請模型用 JSON 模式（很穩定）照工具規格產生參數，收據照片也一起給它看
       const decl = TOOL_DECLS.find((d) => d.name === need);
@@ -2716,7 +2719,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
         const parts: Part[] = [{
           text: `成員（${user.name}）說：「${trigger.text}」${need === "find_short_videos" || need === "plan_route" ? `\n上一則 AI 回答：\n${([...history].reverse().find((m) => m.role === "assistant" && m.id !== id)?.text ?? "").slice(0, 1500)}` : ""}${need === "web_search" && draft ? `\n你剛才準備回答的內容（要查證裡面的店家、景點、活動是否還在、資訊是否正確，產生查證用的搜尋關鍵字）：\n${draft.slice(0, 1200)}` : ""}
 現在是東京時間 ${now.date}（${now.weekday}）${now.time}。旅程 ${TRIP.startDate} 到 ${TRIP.endDate}（第一天＝${TRIP.startDate}）。旅伴名單：${this.members().join("、") || user.name}。
-請產生呼叫工具「${need}」要用的參數。${WRITE_TOOLS.has(need) ? '\n先判斷成員是要你做這件事，還是只是在問問題或聊天（例如「護照大家都帶了嗎？」是在問，不是說帶了）：只是在問就只輸出 {"_skip": true}。' : ""}${hint ? `\n${hint}` : ""}
+請產生呼叫工具「${need}」要用的參數。${JUDGED_TOOLS.has(need) ? `\n先判斷成員是不是真的要你用這個工具：只是在問問題、聊天，或只是說明自己在哪裡（${JUDGE_EXAMPLES}），就只輸出 {"_skip": true}。` : ""}${hint ? `\n${hint}` : ""}
 工具說明：${decl.description}
 參數格式（JSON Schema）：${JSON.stringify(decl.parameters)}
 只輸出參數的 JSON 物件，不要任何其他文字。`,
@@ -2769,8 +2772,8 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 1. summary：把「舊摘要」與新對話合併成新的「整趟旅程對話摘要」（400 字內；保留每個人的偏好、做過的決定、討論過的店家與地點、待辦、重要資訊）。
 2. memories：萃取新對話中「之後還會用到」且「不在現有記憶裡」的事實，每條一句話、寫清楚是誰。
    例如：誰喜歡／不吃什麼、想買什麼、想去哪、決定了什麼、訂了什麼、待辦事項、聊到的店名與地址。
-   不要收錄住宿地址、航班這些系統已知的資料，也不要收錄閒聊或 AI 自己的建議。沒有就回空陣列。
-3. remove_ids：現有記憶中已經過時、被新對話推翻、或重複的記憶 id（例如「想吃燒肉」後來改成「想吃壽司」，就刪掉舊的）。沒有就回空陣列。
+   不要收錄：住宿地址、航班這些系統已知的資料；消費明細與帳目統計（帳本裡都有）；天氣預報、排隊時間、目前位置這類當下狀態；交通路線、轉乘、站數、搭車方向（AI 的路線知識常出錯，記下來會一直重複講錯）；閒聊或 AI 自己的建議。沒有就回空陣列。
+3. remove_ids：現有記憶中已經過時、被新對話推翻、或重複的記憶 id（例如「想吃燒肉」後來改成「想吃壽司」，就刪掉舊的）。沒有就回空陣列。家人糾正了某條記憶（例如說站數不對、店其實有開、時間記錯），一定要把那條舊的放進 remove_ids，再新增正確的。
 
 舊摘要：
 ${this.setting("summary") || "（無）"}
@@ -2803,7 +2806,7 @@ ${transcript}
           const known = this.memories().map((x) => String(x.content));
           for (const m of (json.memories ?? []).slice(0, 20)) {
             const content = String(m?.content ?? "").trim();
-            if (!content || known.some((x) => sameFact(x, content))) continue;
+            if (!content || routeMemory(content, m.category) || known.some((x) => sameFact(x, content))) continue;
             this.addMemory(content, String(m.category || "資訊"), "AI 自動整理");
             known.push(content);
           }
