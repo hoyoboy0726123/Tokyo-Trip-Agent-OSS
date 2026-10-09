@@ -825,8 +825,12 @@ export const TOOLS: Tool[] = [
         required: ["query"],
       },
     },
-    async run(args, { env }) {
+    async run(args, { env, room }) {
       if (!env.TAVILY_API_KEY) return { error: "尚未設定 TAVILY_API_KEY，無法搜尋網路" };
+      // 同樣的搜尋 6 小時內直接用上次的結果（省 Tavily 額度，也比較快）
+      const cacheKey = `web:${String(args.query ?? "").trim().toLowerCase()}:${Math.min(Number(args.max_results) || 5, 8)}`;
+      const cached = room.cacheGet(cacheKey, 6 * 3600_000);
+      if (cached) return JSON.parse(cached);
       const res = await fetch("https://api.tavily.com/search", {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${env.TAVILY_API_KEY.trim()}` },
@@ -835,10 +839,12 @@ export const TOOLS: Tool[] = [
       if (quotaOut(res.status)) return searchOut();
       if (!res.ok) return { error: `搜尋失敗 ${res.status}` };
       const d: any = await res.json();
-      return {
+      const out = {
         answer: d.answer,
         results: (d.results ?? []).map((r: any) => ({ title: r.title, url: r.url, content: String(r.content ?? "").slice(0, 600) })),
       };
+      if (out.results.length) room.cacheSet(cacheKey, JSON.stringify(out));
+      return out;
     },
   },
   {
@@ -878,7 +884,7 @@ export const TOOLS: Tool[] = [
         },
       },
     },
-    async run(args, { env, attachImage }) {
+    async run(args, { env, attachImage, room }) {
       if (!env.TAVILY_API_KEY) return { error: "尚未設定 TAVILY_API_KEY，無法找圖片" };
       const list: string[] = (Array.isArray(args.queries) && args.queries.length ? args.queries : [args.query])
         .map((q: unknown) => String(q ?? "").trim())
@@ -894,6 +900,9 @@ export const TOOLS: Tool[] = [
       const groups = await Promise.all(
         list.map(async (query) => {
           try {
+            // 同樣的關鍵字 12 小時內直接用上次確認過能顯示的圖
+            const hit = room.cacheGet(`img:${query}`, 12 * 3600_000);
+            if (hit) return { query, picked: (JSON.parse(hit) as { url: string; description: string; page?: string }[]).slice(0, perQuery) };
             const res = await fetch("https://api.tavily.com/search", {
               method: "POST",
               headers: { "content-type": "application/json", authorization: `Bearer ${env.TAVILY_API_KEY!.trim()}` },
@@ -916,7 +925,9 @@ export const TOOLS: Tool[] = [
             for (const img of d.images ?? []) add(img);
             for (const r of d.results ?? []) for (const img of r.images ?? []) add(img, r.url);
             const checked = await Promise.all(candidates.slice(0, 8).map(async (c) => ((await imageUsable(c.url)) ? c : null)));
-            return { query, picked: checked.filter((c): c is NonNullable<typeof c> => !!c).slice(0, perQuery) };
+            const usable = checked.filter((c): c is NonNullable<typeof c> => !!c);
+            if (usable.length) room.cacheSet(`img:${query}`, JSON.stringify(usable));
+            return { query, picked: usable.slice(0, perQuery) };
           } catch {
             return { query, picked: [] as { url: string; description: string; page?: string }[] };
           }
