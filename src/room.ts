@@ -117,6 +117,8 @@ const INTENTS: { tool: string; test: (text: string, hasPhoto: boolean) => boolea
   { tool: "add_checklist_items", test: (t) => /(加入|加到|加進|放進|放到|列入|記到|記進|寫進|存進).{0,8}(清單|待辦)|清單.{0,4}(加|新增|放)/.test(t) },
   { tool: "taxi_fare", test: (t) => /(計程車|taxi|叫車|的士).{0,20}(多少|費用|車資|多久|錢|價)/i.test(t) || /車資/.test(t) },
   { tool: "japan_alerts", test: (t) => /地震|颱風|海嘯|警報|豪雨/.test(t) },
+  // 問天氣、會不會下雨：要查（模型會說「我幫你查了一下」卻沒查）
+  { tool: "get_weather", test: (t) => /(會不會|要不要|有沒有).{0,6}(下雨|帶傘|颳風)|天氣(怎麼樣|如何|好嗎|預報)|幾度|冷不冷|熱不熱|降雨|帶傘/.test(t) },
   { tool: "train_status", test: (t) => /延誤|停駛|誤點|停開|運行狀況|電車.{0,6}(正常|狀況)/.test(t) },
   { tool: "find_nearby", test: (t) => /附近|周邊|周圍|旁邊有什麼/.test(t), alt: ["web_search"] },
 ];
@@ -790,6 +792,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
   private shouldReply(text: string, hasPhoto: boolean, toAi = false): boolean {
     if (!text && !hasPhoto) return false; // 單純分享位置不打擾 AI
     if (toAi) return true; // 回覆 AI 的訊息＝在問 AI，「只回 @AI」模式也要回答
+    if (text.startsWith("🆘")) return true; // 求助（走散）一定要回，「只回 @AI」模式也一樣
     if (this.settings().replyMode === "all") return true;
     return /@(ai|AI|旅伴|助理|小幫手)/.test(text) || text.startsWith("/ai") || (hasPhoto && /@/.test(text));
   }
