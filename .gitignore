@@ -1,0 +1,6 @@
+node_modules/
+.wrangler/
+.dev.vars
+# 旅程資料有住址、航班這些私人資料：只上傳 trip-data.example.ts
+src/trip-data.ts
+.DS_Store

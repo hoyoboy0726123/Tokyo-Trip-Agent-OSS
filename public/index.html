@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+  <title>東京旅伴</title>
+  <meta name="theme-color" content="#F4EEE3" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="東京旅伴" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=LXGW+WenKai+TC:wght@700&amp;display=swap" />
+  <link rel="stylesheet" href="/style.css" />
+  <script src="/vendor/marked.min.js" defer></script>
+  <script src="/vendor/purify.min.js" defer></script>
+  <script src="/app.js" defer></script>
+  <script src="/photos.js" defer></script>
+</head>
+<body>
+  <!-- 登入 -->
+  <section id="login" class="login" hidden>
+    <form id="login-form" class="login-card">
+      <div class="login-logo">🗼</div>
+      <h1>東京旅伴</h1>
+      <p class="muted">2026/10/3 – 10/10 東京親子旅行</p>
+      <label>你的暱稱
+        <input id="login-name" name="name" maxlength="16" placeholder="例如：爸爸、媽媽、哥哥" autocomplete="nickname" required />
+      </label>
+      <label>房間密碼
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <p id="login-error" class="error" hidden></p>
+      <button type="submit" class="primary">進入群聊</button>
+    </form>
+  </section>
+
+  <!-- 主畫面 -->
+  <section id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="topbar-text">
+        <div class="today-title" id="today-title">東京旅伴</div>
+        <div class="topbar-sub"><b id="day-badge"></b><span id="online" class="online"></span></div>
+      </div>
+      <div class="topbar-end">
+        <button type="button" id="nc-toggle" class="nc-toggle" aria-pressed="false" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>下一站</button>
+        <div class="avatars" id="avatars" aria-hidden="true"></div>
+      </div>
+    </header>
+
+    <button type="button" id="next-card" class="next-card" hidden></button>
+    <button type="button" id="pin-bar" class="pin-bar" hidden></button>
+    <div id="conn" class="conn" hidden>連線中…</div>
+    <div id="sos-banner" class="sos-banner" hidden></div>
+
+    <main id="messages" class="messages" aria-live="polite">
+      <button id="load-more" class="load-more" hidden>載入更早的訊息</button>
+    </main>
+
+    <footer class="composer">
+      <button type="button" id="to-latest" class="to-latest" aria-label="跳到最新訊息" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg><span id="to-latest-n" hidden></span></button>
+      <div class="chips" id="chips" hidden></div>
+      <div id="reply-bar" class="reply-bar" hidden></div>
+      <div id="attach" class="attach" hidden>
+        <div id="attach-imgs" class="attach-imgs"></div>
+        <span id="attach-loc"></span>
+        <button id="attach-clear" class="icon" aria-label="移除附件">✕</button>
+      </div>
+      <form id="send-form" class="send-row">
+        <button type="button" id="chips-toggle" class="round-btn chips-toggle" aria-expanded="false" aria-label="展開快捷功能"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></button>
+        <label class="round-btn" aria-label="拍照或選照片"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg><input id="photo-input" type="file" accept="image/*" multiple hidden /></label>
+        <textarea id="input" rows="1" placeholder="問旅伴 AI 任何事…" enterkeyhint="send" aria-label="訊息"></textarea>
+        <button type="submit" class="send" id="send-btn" aria-label="送出"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg></button>
+      </form>
+    </footer>
+
+    <nav class="tabbar" id="tabbar" aria-label="主選單">
+      <button data-tab="chat" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>聊天</button>
+      <button data-tab="translator"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>翻譯</button>
+      <button data-tab="expenses"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></svg>記帳</button>
+      <button data-tab="hub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/><rect width="20" height="14" x="2" y="6" rx="2"/></svg>工具箱</button>
+      <button data-tab="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4"/></svg>設定</button>
+    </nav>
+  </section>
+
+  <!-- 「更多」：傳給 AI 的動作與常用問法 -->
+  <dialog id="more" class="sheet" aria-label="更多功能">
+    <div class="sheet-handle"></div>
+    <div class="sheet-head"><h2>想請 AI 幫什麼？</h2><button class="icon" id="more-close" aria-label="關閉">✕</button></div>
+    <div class="sheet-label">直接傳給 AI</div>
+    <div class="action-grid" id="more-actions"></div>
+    <div class="sheet-label">常用問法</div>
+    <div class="ask-list" id="more-asks"></div>
+  </dialog>
+
+  <dialog id="pins" class="sheet" aria-label="置頂訊息">
+    <div class="sheet-handle"></div>
+    <div class="sheet-head"><h2>置頂訊息</h2><button class="icon" id="pins-close" aria-label="關閉">✕</button></div>
+    <div class="pin-list" id="pin-list"></div>
+  </dialog>
+
+  <!-- 面板 -->
+  <dialog id="panel" class="panel">
+    <div class="panel-head">
+      <h2 id="panel-title"></h2>
+      <button class="icon" id="panel-close">✕</button>
+    </div>
+    <div id="panel-body" class="panel-body"></div>
+  </dialog>
+
+  <dialog id="viewer" class="viewer"><img id="viewer-img" alt="" />
+    <button type="button" id="viewer-dl" class="viewer-dl"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg><span>下載</span></button></dialog>
+
+  <!-- 中日翻譯 -->
+  <dialog id="translator" class="translator">
+    <div class="tr-head">
+      <button class="icon" id="tr-close" title="回到聊天">✕</button>
+      <div class="tr-tabs" id="tr-tabs">
+        <button data-tab="phrases">常用句</button>
+        <button data-tab="live">即時翻譯</button>
+        <button data-tab="history">紀錄</button>
+      </div>
+    </div>
+    <div id="tr-body" class="tr-body"></div>
+  </dialog>
+
+  <!-- 全螢幕給對方看 -->
+  <dialog id="showcase" class="showcase">
+    <div class="showcase-ja" id="showcase-ja"></div>
+    <div class="showcase-kana" id="showcase-kana"></div>
+    <div class="showcase-zh" id="showcase-zh"></div>
+    <div class="showcase-actions">
+      <button class="btn" id="showcase-speak">🔊 再念一次</button>
+      <button class="btn" id="showcase-close">關閉</button>
+    </div>
+  </dialog>
+</body>
+</html>

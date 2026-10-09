@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tokyo-trip-agent",
+  // Tokyo-Trip 帳號：Workers AI 免費額度以帳號計算，獨立帳號才不會和其他專案搶額度
+  "account_id": "f3cd01403bd458fcb33f39284d79d5f1",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/ws", "/share/*"]
+  },
+  "ai": { "binding": "AI" },
+  "durable_objects": {
+    "bindings": [{ "name": "ROOM", "class_name": "TripRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TripRoom"] }],
+  "vars": {
+    "GEMINI_MODEL": "gemini-3.5-flash-lite",
+    "GEMINI_BACKUP_MODEL": "gemini-3.1-flash-lite",
+    "GEMINI_WRITER_MODEL": "gemini-3.8-flash",
+    "GEMINI_RPM": "15",
+    "GEMINI_TPM": "250000",
+    "GEMINI_RPD": "500",
+    "WORKERS_AI_MODEL": "@cf/google/gemma-4-26b-a4b-it",
+    "DEFAULT_PROVIDER": "gemini"
+  },
+  "version_metadata": { "binding": "CF_VERSION" },
+  "observability": { "enabled": true }
+}
